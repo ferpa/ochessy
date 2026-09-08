@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import time
@@ -15,9 +16,15 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 USER_AGENT = "OChessy/1.0 (Omarchy plugin; +https://omarchy.org)"
 API_ROOT = "https://api.chess.com/pub"
+API_HOST = "api.chess.com"
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_ERROR_BYTES = 1024
+USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,29}$")
+ARCHIVE_PATH_RE = re.compile(r"^/pub/player/([a-z0-9][a-z0-9_-]{0,29})/games/\d{4}/\d{2}$")
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ochessy"
 TIME_CLASSES = ("bullet", "blitz", "rapid", "daily")
 DRAW_RESULTS = {
@@ -49,6 +56,8 @@ def cache_path(name: str) -> Path:
 def read_cache(name: str, ttl: int) -> Any | None:
     path = cache_path(name)
     try:
+        if path.stat().st_size > MAX_RESPONSE_BYTES:
+            return None
         age = time.time() - path.stat().st_mtime
         if age > ttl:
             return None
@@ -64,7 +73,66 @@ def write_cache(name: str, payload: Any) -> None:
     tmp.replace(path)
 
 
-def http_get(url: str, accept: str = "application/json") -> bytes:
+def require_username(value: str) -> str:
+    user = normalize_username(value)
+    if not user or not USERNAME_RE.fullmatch(user):
+        raise RuntimeError("Invalid Chess.com username")
+    return user
+
+
+def allowed_chess_api_url(url: str, username: str) -> bool:
+    if not username or not USERNAME_RE.fullmatch(username):
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        return False
+    if parsed.netloc.lower() != API_HOST:
+        return False
+    if parsed.query or parsed.fragment or parsed.params or parsed.username or parsed.password:
+        return False
+    path = parsed.path.rstrip("/") or "/"
+    prefix = f"/pub/player/{username}"
+    if path in {prefix, f"{prefix}/stats", f"{prefix}/games/archives"}:
+        return True
+    match = ARCHIVE_PATH_RE.fullmatch(path)
+    return bool(match and match.group(1) == username)
+
+
+def allowed_archive_url(url: str, username: str) -> bool:
+    if not allowed_chess_api_url(url, username):
+        return False
+    parsed = urlparse(url)
+    match = ARCHIVE_PATH_RE.fullmatch(parsed.path.rstrip("/") or "/")
+    return bool(match and match.group(1) == username)
+
+
+def read_limited(fp: Any, limit: int) -> bytes:
+    if fp is None:
+        return b""
+    data = fp.read(limit + 1)
+    if not data:
+        return b""
+    if len(data) > limit:
+        raise RuntimeError(f"HTTP body exceeded {limit} bytes")
+    return data
+
+
+def opener_for(username: str) -> urllib.request.OpenerDirector:
+    class RestrictedRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            resolved = urljoin(req.full_url, newurl)
+            if not allowed_chess_api_url(resolved, username):
+                raise RuntimeError(f"Refusing redirect to {resolved}")
+            return urllib.request.HTTPRedirectHandler.redirect_request(
+                self, req, fp, code, msg, headers, newurl
+            )
+
+    return urllib.request.build_opener(RestrictedRedirect)
+
+
+def http_get(url: str, username: str, accept: str = "application/json") -> bytes:
+    if not allowed_chess_api_url(url, username):
+        raise RuntimeError(f"Refusing non-Chess.com API URL: {url}")
     req = urllib.request.Request(
         url,
         headers={
@@ -73,21 +141,31 @@ def http_get(url: str, accept: str = "application/json") -> bytes:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return resp.read()
+        with opener_for(username).open(req, timeout=20) as resp:
+            final_url = resp.geturl()
+            if not allowed_chess_api_url(final_url, username):
+                raise RuntimeError(f"Refusing non-Chess.com API URL: {final_url}")
+            length = resp.headers.get("Content-Length")
+            if length is not None:
+                try:
+                    if int(length) > MAX_RESPONSE_BYTES:
+                        raise RuntimeError(f"HTTP response too large ({length} bytes)")
+                except ValueError:
+                    pass
+            return read_limited(resp, MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:240]
+        body = read_limited(exc, MAX_ERROR_BYTES).decode("utf-8", errors="replace")[:240]
         raise RuntimeError(f"HTTP {exc.code} for {url}: {body}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Network error for {url}: {exc.reason}") from exc
 
 
-def api_get(url: str, cache_name: str, ttl: int, pause: float = 0.4) -> Any:
+def api_get(url: str, cache_name: str, ttl: int, username: str, pause: float = 0.4) -> Any:
     cached = read_cache(cache_name, ttl)
     if cached is not None:
         return cached
     time.sleep(pause)
-    payload = json.loads(http_get(url).decode("utf-8"))
+    payload = json.loads(http_get(url, username).decode("utf-8"))
     write_cache(cache_name, payload)
     return payload
 
@@ -236,30 +314,44 @@ def summarize_game(raw: dict[str, Any], username: str) -> dict[str, Any] | None:
 
 
 def fetch_profile(username: str) -> dict[str, Any]:
-    return api_get(f"{API_ROOT}/player/{username}", f"player_{username}.json", ttl=300)
+    user = require_username(username)
+    return api_get(f"{API_ROOT}/player/{user}", f"player_{user}.json", ttl=300, username=user)
 
 
 def fetch_stats(username: str) -> dict[str, Any]:
-    return api_get(f"{API_ROOT}/player/{username}/stats", f"stats_{username}.json", ttl=180)
+    user = require_username(username)
+    return api_get(f"{API_ROOT}/player/{user}/stats", f"stats_{user}.json", ttl=180, username=user)
 
 
 def fetch_archives(username: str) -> list[str]:
+    user = require_username(username)
     payload = api_get(
-        f"{API_ROOT}/player/{username}/games/archives",
-        f"archives_{username}.json",
+        f"{API_ROOT}/player/{user}/games/archives",
+        f"archives_{user}.json",
         ttl=600,
+        username=user,
     )
     archives = payload.get("archives") if isinstance(payload, dict) else None
-    return list(archives or [])
+    allowed: list[str] = []
+    for item in archives or []:
+        url = str(item)
+        if allowed_archive_url(url, user):
+            allowed.append(url)
+    return allowed
 
 
 def fetch_month(archive_url: str, username: str) -> list[dict[str, Any]]:
+    user = require_username(username)
+    if not allowed_archive_url(archive_url, user):
+        raise RuntimeError(f"Refusing non-Chess.com archive URL: {archive_url}")
     parts = archive_url.rstrip("/").split("/")
     stamp = "_".join(parts[-2:]) if len(parts) >= 2 else "month"
+    if not re.fullmatch(r"\d{4}_\d{2}", stamp):
+        raise RuntimeError(f"Refusing non-Chess.com archive URL: {archive_url}")
     now = datetime.now(timezone.utc)
     current = f"{now.year}_{now.month:02d}"
     ttl = 120 if stamp == current else 3600
-    payload = api_get(archive_url, f"games_{username}_{stamp}.json", ttl=ttl)
+    payload = api_get(archive_url, f"games_{user}_{stamp}.json", ttl=ttl, username=user)
     games = payload.get("games") if isinstance(payload, dict) else None
     return list(games or [])
 
