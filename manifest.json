@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "id": "ochessy",
+  "name": "OChessy",
+  "version": "1.0.0",
+  "author": "kingnick",
+  "license": "MIT",
+  "description": "Chess.com stats on the bar, local Stockfish game review, and allowlisted lesson links.",
+  "keywords": ["chess", "chess.com", "stockfish", "tactics", "lessons", "quickshell"],
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OChessy",
+    "description": "Chess.com ratings, game review, and lesson recommendations",
+    "category": "Info",
+    "defaultSection": "right",
+    "allowMultiple": false,
+    "defaults": {
+      "username": "",
+      "timeClass": "auto",
+      "depth": 12
+    },
+    "schema": [
+      {
+        "key": "username",
+        "type": "string",
+        "label": "Chess.com username",
+        "defaultValue": ""
+      },
+      {
+        "key": "timeClass",
+        "type": "string",
+        "label": "Rating to show (auto, bullet, blitz, rapid, daily)",
+        "defaultValue": "auto"
+      },
+      {
+        "key": "depth",
+        "type": "integer",
+        "label": "Stockfish analysis depth",
+        "min": 8,
+        "max": 18,
+        "step": 1,
+        "defaultValue": 12
+      }
+    ]
+  }
+}

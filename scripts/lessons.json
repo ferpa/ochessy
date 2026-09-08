@@ -1,0 +1,213 @@
+{
+  "themes": {
+    "hanging_piece": {
+      "chesscom": [
+        {
+          "title": "Capturing Pieces",
+          "url": "https://www.chess.com/lessons/capturing-pieces"
+        }
+      ],
+      "thirdParty": [
+        {
+          "title": "Hanging piece puzzles",
+          "url": "https://lichess.org/training/hangingPiece",
+          "source": "Lichess",
+          "kind": "puzzles"
+        },
+        {
+          "title": "Chess tactics trainer",
+          "url": "https://en.chesstempo.com/chess-tactics",
+          "source": "Chess Tempo",
+          "kind": "trainer"
+        }
+      ]
+    },
+    "missed_tactic": {
+      "chesscom": [
+        {
+          "title": "Introduction to Tactics",
+          "url": "https://www.chess.com/lessons/introduction-to-tactics"
+        }
+      ],
+      "thirdParty": [
+        {
+          "title": "The Fork",
+          "url": "https://lichess.org/practice/fundamental-tactics/the-fork/Qj281y1p/gbZ9lx0e",
+          "source": "Lichess",
+          "kind": "practice"
+        },
+        {
+          "title": "Tactical motifs encyclopedia",
+          "url": "https://en.chesstempo.com/tactical-motifs",
+          "source": "Chess Tempo",
+          "kind": "reference"
+        }
+      ]
+    },
+    "fork": {
+      "chesscom": [
+        {
+          "title": "Introduction to Tactics",
+          "url": "https://www.chess.com/lessons/introduction-to-tactics"
+        }
+      ],
+      "thirdParty": [
+        {
+          "title": "The Fork",
+          "url": "https://lichess.org/practice/fundamental-tactics/the-fork/Qj281y1p/gbZ9lx0e",
+          "source": "Lichess",
+          "kind": "practice"
+        },
+        {
+          "title": "Fork puzzles",
+          "url": "https://lichess.org/training/fork",
+          "source": "Lichess",
+          "kind": "puzzles"
+        }
+      ]
+    },
+    "pin": {
+      "chesscom": [
+        {
+          "title": "Capturing Pieces",
+          "url": "https://www.chess.com/lessons/capturing-pieces"
+        }
+      ],
+      "thirdParty": [
+        {
+          "title": "The Pin",
+          "url": "https://lichess.org/practice/basic-tactics/the-pin/9ogFv8Ac",
+          "source": "Lichess",
+          "kind": "practice"
+        },
+        {
+          "title": "Pin puzzles",
+          "url": "https://lichess.org/training/pin",
+          "source": "Lichess",
+          "kind": "puzzles"
+        }
+      ]
+    },
+    "opening": {
+      "chesscom": [
+        {
+          "title": "Opening Principles",
+          "url": "https://www.chess.com/lessons/opening-principles"
+        }
+      ],
+      "thirdParty": [
+        {
+          "title": "Learn chess",
+          "url": "https://lichess.org/learn",
+          "source": "Lichess",
+          "kind": "learn"
+        },
+        {
+          "title": "Opening puzzles",
+          "url": "https://lichess.org/training/opening",
+          "source": "Lichess",
+          "kind": "puzzles"
+        }
+      ]
+    },
+    "king_safety": {
+      "chesscom": [
+        {
+          "title": "Opening Principles",
+          "url": "https://www.chess.com/lessons/opening-principles"
+        }
+      ],
+      "thirdParty": [
+        {
+          "title": "Beginner chess lessons",
+          "url": "https://saintlouischessclub.org/education/learn/beginner-chess-lessons/",
+          "source": "Saint Louis Chess Club",
+          "kind": "curriculum"
+        },
+        {
+          "title": "Learn chess",
+          "url": "https://lichess.org/learn",
+          "source": "Lichess",
+          "kind": "learn"
+        }
+      ]
+    },
+    "checkmate": {
+      "chesscom": [
+        {
+          "title": "Essential Checkmate Patterns",
+          "url": "https://www.chess.com/lessons/essential-checkmate-patterns"
+        },
+        {
+          "title": "Exclusively Checkmates",
+          "url": "https://www.chess.com/lessons/exclusively-checkmates"
+        }
+      ],
+      "thirdParty": [
+        {
+          "title": "Practice: checkmates and patterns",
+          "url": "https://lichess.org/practice",
+          "source": "Lichess",
+          "kind": "practice"
+        }
+      ]
+    },
+    "endgame": {
+      "chesscom": [
+        {
+          "title": "Endgame Patterns",
+          "url": "https://www.chess.com/lessons/endgame-patterns"
+        },
+        {
+          "title": "Mastering the Endgame",
+          "url": "https://www.chess.com/lessons/mastering-the-endgame"
+        },
+        {
+          "title": "Pawn Endings: Beginner to Expert",
+          "url": "https://www.chess.com/lessons/pawn-endings-beginner-to-expert"
+        }
+      ],
+      "thirdParty": [
+        {
+          "title": "Opposition",
+          "url": "https://lichess.org/practice/pawn-endgames/opposition/A4ujYOer/TUjQitNN",
+          "source": "Lichess",
+          "kind": "practice"
+        },
+        {
+          "title": "Endgame puzzles",
+          "url": "https://lichess.org/training/endgame",
+          "source": "Lichess",
+          "kind": "puzzles"
+        }
+      ]
+    },
+    "general": {
+      "chesscom": [
+        {
+          "title": "Introduction to Tactics",
+          "url": "https://www.chess.com/lessons/introduction-to-tactics"
+        }
+      ],
+      "thirdParty": [
+        {
+          "title": "Practice chess positions",
+          "url": "https://lichess.org/practice",
+          "source": "Lichess",
+          "kind": "practice"
+        },
+        {
+          "title": "Intermediate chess lessons",
+          "url": "https://saintlouischessclub.org/education/learn/intermediate-chess-lessons/",
+          "source": "Saint Louis Chess Club",
+          "kind": "curriculum"
+        }
+      ]
+    }
+  },
+  "ratingTracks": {
+    "beginner": "https://saintlouischessclub.org/education/learn/beginner-chess-lessons/",
+    "intermediate": "https://saintlouischessclub.org/education/learn/intermediate-chess-lessons/",
+    "advanced": "https://saintlouischessclub.org/education/learn/advanced-chess-lessons/"
+  }
+}
