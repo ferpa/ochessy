@@ -268,7 +268,7 @@ Panel {
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
-        ScrollBar.vertical: QC.ScrollBar { policy: QC.ScrollBar.AsNeeded }
+        QC.ScrollBar.vertical: QC.ScrollBar { policy: QC.ScrollBar.AsNeeded }
 
         Column {
           id: column
