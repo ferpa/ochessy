@@ -8,11 +8,13 @@ export PATH="${HOME}/.local/bin:${PATH}"
 USERNAME=""
 TIME_CLASS="auto"
 DEPTH="12"
+LEELA_SECONDS="0"
+LEELA_POSITIONS="5"
 GAME_URL=""
 INDEX="0"
 
 usage() {
-  echo "Usage: review.sh --username NAME [--depth N] [--game-url URL] [--index N]"
+  echo "Usage: review.sh --username NAME [--depth N] [--game-url URL] [--index N] [--leela-seconds N] [--leela-positions N]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -27,6 +29,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --depth)
       DEPTH="${2:-12}"
+      shift 2
+      ;;
+    --leela-seconds)
+      LEELA_SECONDS="${2:-0}"
+      shift 2
+      ;;
+    --leela-positions)
+      LEELA_POSITIONS="${2:-5}"
       shift 2
       ;;
     --game-url)
@@ -80,6 +90,8 @@ argv=(python3 "$SCRIPT_DIR/ochessy.py" review
   --username "$USERNAME"
   --time-class "$TIME_CLASS"
   --depth "$DEPTH"
+  --leela-seconds "$LEELA_SECONDS"
+  --leela-positions "$LEELA_POSITIONS"
   --index "$INDEX"
   --output "$REPORT")
 if [[ -n $GAME_URL ]]; then

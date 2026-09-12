@@ -102,6 +102,22 @@ function normalizeDepth(value) {
   return n
 }
 
+function normalizeLeelaSeconds(value) {
+  var n = parseInt(String(value || ""), 10)
+  if (!isFinite(n)) n = 0
+  if (n < 0) n = 0
+  if (n > 30) n = 30
+  return n
+}
+
+function normalizeLeelaPositions(value) {
+  var n = parseInt(String(value || ""), 10)
+  if (!isFinite(n)) n = 5
+  if (n < 0) n = 0
+  if (n > 8) n = 8
+  return n
+}
+
 function pad2(n) {
   return n < 10 ? "0" + n : String(n)
 }

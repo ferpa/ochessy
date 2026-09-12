@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -27,6 +28,12 @@ USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,29}$")
 ARCHIVE_PATH_RE = re.compile(r"^/pub/player/([a-z0-9][a-z0-9_-]{0,29})/games/\d{4}/\d{2}$")
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ochessy"
 TIME_CLASSES = ("bullet", "blitz", "rapid", "daily")
+# Leela is the optional second opinion, never the primary engine: Stockfish
+# still does the full-game pass. Override the binary (e.g. "prime-run lc0"
+# on hybrid graphics) with OCHESSY_LEELA_CMD.
+LEELA_ENV = "OCHESSY_LEELA_CMD"
+LEELA_MAX_SECONDS = 30
+LEELA_MAX_POSITIONS = 8
 DRAW_RESULTS = {
     "agreed",
     "stalemate",
@@ -174,17 +181,44 @@ def normalize_username(value: str) -> str:
     return str(value or "").strip().lstrip("@").lower()
 
 
-def stockfish_path() -> str | None:
-    found = shutil.which("stockfish")
+def binary_path(name: str) -> str | None:
+    found = shutil.which(name)
     if found:
         return found
-    home_local = Path.home() / ".local" / "bin" / "stockfish"
+    home_local = Path.home() / ".local" / "bin" / name
     if home_local.is_file() and os.access(home_local, os.X_OK):
         return str(home_local)
-    for candidate in ("/usr/bin/stockfish", "/usr/local/bin/stockfish"):
+    for candidate in (f"/usr/bin/{name}", f"/usr/local/bin/{name}"):
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None
+
+
+def stockfish_path() -> str | None:
+    return binary_path("stockfish")
+
+
+def leela_command() -> list[str] | None:
+    """argv for Leela, or None when it is not usable.
+
+    Returns a list rather than a path because a hybrid-graphics box needs a
+    launcher in front of the binary (`prime-run lc0`) to land on the discrete
+    GPU, and python-chess accepts an argv vector for popen_uci.
+    """
+    override = os.environ.get(LEELA_ENV, "").strip()
+    if override:
+        try:
+            parts = shlex.split(override)
+        except ValueError:
+            return None
+        if not parts:
+            return None
+        head = binary_path(parts[0]) or (parts[0] if os.path.isfile(parts[0]) else None)
+        if not head:
+            return None
+        return [head] + parts[1:]
+    found = binary_path("lc0")
+    return [found] if found else None
 
 
 def missing_packages() -> list[str]:
@@ -596,7 +630,112 @@ def score_cp(info: Any, color: Any) -> int:
     return int(value)
 
 
-def analyze_game(game: dict[str, Any], username: str, depth: int) -> dict[str, Any]:
+def leela_second_opinion(
+    errors: list[dict[str, Any]],
+    seconds: int,
+    positions: int,
+) -> dict[str, Any]:
+    """Re-examine the worst Stockfish findings with Leela.
+
+    Only the flagged positions are revisited, never the whole game: Leela is a
+    neural engine and wants time or nodes, not the fixed depth the Stockfish
+    pass uses, so a full-game run at a comparable strength would take minutes.
+    Time-limited is also the only limit that behaves the same on the CPU
+    (openblas) and CUDA builds.
+
+    The interesting output is not a second opinion on the score but the
+    disagreement: when Leela likes a different move, or rates the played move
+    far less harshly than Stockfish did, that position is usually a real
+    decision rather than a tactical oversight.
+    """
+    result: dict[str, Any] = {"status": "off", "seconds": seconds, "entries": []}
+    if seconds <= 0 or positions <= 0:
+        return result
+
+    targets = [err for err in errors if err.get("fen") and err.get("uci")][:positions]
+    if not targets:
+        return result
+
+    command = leela_command()
+    if not command:
+        result["status"] = "missing"
+        return result
+
+    import chess
+    import chess.engine
+
+    try:
+        engine = chess.engine.SimpleEngine.popen_uci(command)
+    except Exception as exc:  # noqa: BLE001
+        result["status"] = "error"
+        result["error"] = str(exc)[:200]
+        return result
+
+    limit = chess.engine.Limit(time=float(seconds))
+    try:
+        for position, err in enumerate(targets, start=1):
+            eprint(f"Leela second opinion {position}/{len(targets)}…")
+            board = chess.Board(err["fen"])
+            mover = board.turn
+
+            info = engine.analyse(board, limit, multipv=1)
+            if isinstance(info, list):
+                info = info[0]
+            pv = info.get("pv") or []
+            best = pv[0] if pv else None
+            best_san = ""
+            if best is not None:
+                try:
+                    best_san = board.san(best)
+                except ValueError:
+                    best_san = best.uci()
+            before = score_cp(info, mover)
+
+            board.push(chess.Move.from_uci(err["uci"]))
+            after_info = engine.analyse(board, limit)
+            if isinstance(after_info, list):
+                after_info = after_info[0]
+            after = score_cp(after_info, mover)
+            board.pop()
+
+            cpl = max(0, before - after)
+            result["entries"].append(
+                {
+                    "ply": err.get("ply"),
+                    "moveNumber": err.get("moveNumber"),
+                    "san": err.get("san"),
+                    "stockfishBest": err.get("best"),
+                    "stockfishCpl": err.get("cpl"),
+                    "leelaBest": best_san,
+                    "leelaCpl": cpl,
+                    "evalBefore": before,
+                    "evalAfter": after,
+                    "agrees": bool(best_san) and best_san == err.get("best"),
+                    "verdict": classify_cpl(cpl),
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        result["status"] = "error"
+        result["error"] = str(exc)[:200]
+        return result
+    finally:
+        try:
+            engine.quit()
+        except Exception:  # noqa: BLE001
+            pass
+
+    result["status"] = "ok"
+    result["engine"] = " ".join(command)
+    return result
+
+
+def analyze_game(
+    game: dict[str, Any],
+    username: str,
+    depth: int,
+    leela_seconds: int = 0,
+    leela_positions: int = 0,
+) -> dict[str, Any]:
     missing = missing_packages()
     if missing:
         raise RuntimeError("Install with: omarchy pkg aur add " + " ".join(missing))
@@ -676,6 +815,11 @@ def analyze_game(game: dict[str, Any], username: str, depth: int) -> dict[str, A
                     tip = move_tip(kind, san, best_san, cpl, tags, phase)
                     errors.append(
                         {
+                            # FEN/UCI of the position *before* the played move:
+                            # the Leela pass replays only these, instead of
+                            # walking the whole game a second time.
+                            "fen": board.fen(),
+                            "uci": move.uci(),
                             "ply": ply,
                             "moveNumber": (ply + 1) // 2,
                             "san": san,
@@ -700,6 +844,8 @@ def analyze_game(game: dict[str, Any], username: str, depth: int) -> dict[str, A
     if not ranked_themes:
         ranked_themes = ["general"]
 
+    leela = leela_second_opinion(errors, leela_seconds, leela_positions)
+
     lessons = recommend_lessons(ranked_themes, int(game.get("whiteRating") if game.get("userColor") == "white" else game.get("blackRating") or 0))
     worst_phase = max(phase_loss, key=lambda key: phase_loss[key]) if any(phase_loss.values()) else "middlegame"
 
@@ -713,6 +859,7 @@ def analyze_game(game: dict[str, Any], username: str, depth: int) -> dict[str, A
         "worstPhase": worst_phase,
         "themes": ranked_themes,
         "errors": errors[:8],
+        "leela": leela,
         "tips": build_tips(errors, ranked_themes, worst_phase, counts),
         "lessons": lessons,
     }
@@ -824,6 +971,13 @@ def fmt_eval(cp: int) -> str:
     return f"{cp / 100:+.2f}"
 
 
+def leela_header(review: dict[str, Any]) -> str:
+    leela = review.get("leela") or {}
+    if leela.get("status") != "ok" or not leela.get("entries"):
+        return ""
+    return f" + Leela on {len(leela['entries'])} position(s)"
+
+
 def render_report(review: dict[str, Any]) -> str:
     game = review.get("game") or {}
     counts = review.get("counts") or {}
@@ -839,7 +993,8 @@ def render_report(review: dict[str, Any]) -> str:
 
     lines = [
         f"{bold}OChessy game review{reset}",
-        f"{dim}Local Stockfish depth {review.get('depth')} — not Chess.com Game Review{reset}",
+        f"{dim}Local Stockfish depth {review.get('depth')}"
+        f"{leela_header(review)} — not Chess.com Game Review{reset}",
         "",
         f"{bold}{game.get('white', '?')} vs {game.get('black', '?')}{reset}",
         f"{game.get('timeClass', '')} · you played {game.get('userColor', '')} · {game.get('result', '')}",
@@ -868,6 +1023,44 @@ def render_report(review: dict[str, Any]) -> str:
                 f"({fmt_eval(err.get('evalBefore', 0))} → {fmt_eval(err.get('evalAfter', 0))}, -{err.get('cpl')} cp)"
             )
             lines.append(f"    {err.get('tip')}")
+
+    leela = review.get("leela") or {}
+    status = leela.get("status")
+    if status == "ok" and leela.get("entries"):
+        lines += [
+            "",
+            f"{bold}{cyan}Leela second opinion{reset}"
+            f"{dim}  ({leela.get('seconds')}s per position){reset}",
+        ]
+        for item in leela["entries"]:
+            if item.get("agrees"):
+                verdict = f"{green}same move{reset}"
+            elif item.get("leelaBest"):
+                verdict = f"{yellow}prefers {item['leelaBest']}{reset}"
+            else:
+                verdict = f"{dim}no line{reset}"
+            lines.append(
+                f"  Move {item.get('moveNumber')}  {item.get('san')}   "
+                f"Stockfish -{item.get('stockfishCpl')} cp  ·  "
+                f"Leela -{item.get('leelaCpl')} cp  ·  {verdict}"
+            )
+            gap = int(item.get("stockfishCpl") or 0) - int(item.get("leelaCpl") or 0)
+            if gap >= 80:
+                lines.append(
+                    f"    {dim}Leela is much softer here — usually a position where the two"
+                    f" engines price compensation differently, not a clean blunder.{reset}"
+                )
+            elif gap <= -80:
+                lines.append(f"    {dim}Leela punishes this harder than Stockfish did.{reset}")
+    elif status == "missing":
+        lines += [
+            "",
+            f"{dim}Leela second opinion is on but lc0 was not found."
+            f" Install it with: omarchy pkg aur add lc0"
+            f" (or point {LEELA_ENV} at the binary).{reset}",
+        ]
+    elif status == "error":
+        lines += ["", f"{dim}Leela second opinion failed: {leela.get('error', '')}{reset}"]
 
     lessons = review.get("lessons") or {}
     chesscom = lessons.get("chesscom") or []
@@ -928,7 +1121,13 @@ def cmd_review(args: argparse.Namespace) -> int:
         game = find_game(username, game_url=args.game_url or "", index=args.index)
         if not game.get("pgn"):
             raise RuntimeError("That game has no PGN in the public archive.")
-        review = analyze_game(game, username, depth=max(8, min(18, int(args.depth))))
+        review = analyze_game(
+            game,
+            username,
+            depth=max(8, min(18, int(args.depth))),
+            leela_seconds=max(0, min(LEELA_MAX_SECONDS, int(args.leela_seconds))),
+            leela_positions=max(0, min(LEELA_MAX_POSITIONS, int(args.leela_positions))),
+        )
     except Exception as exc:  # noqa: BLE001
         eprint(str(exc))
         return 1
@@ -958,6 +1157,10 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--depth", type=int, default=12)
     review.add_argument("--game-url", default="")
     review.add_argument("--index", type=int, default=0)
+    review.add_argument("--leela-seconds", type=int, default=0,
+                        help="seconds Leela spends per flagged position (0 disables it)")
+    review.add_argument("--leela-positions", type=int, default=5,
+                        help="how many of the worst positions Leela revisits")
     review.add_argument("--output", default="")
     review.add_argument("--json", action="store_true")
     review.set_defaults(func=cmd_review)

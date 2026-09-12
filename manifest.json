@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "ochessy",
   "name": "OChessy",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "kingnick",
   "license": "MIT",
-  "description": "Chess.com stats on the bar, local Stockfish game review, and allowlisted lesson links.",
+  "description": "Chess.com stats on the bar, local Stockfish game review with an optional Leela second opinion, and allowlisted lesson links.",
   "keywords": ["chess", "chess.com", "stockfish", "tactics", "lessons", "quickshell"],
   "kinds": ["bar-widget"],
   "entryPoints": {
@@ -20,7 +20,9 @@
     "defaults": {
       "username": "",
       "timeClass": "auto",
-      "depth": 12
+      "depth": 12,
+      "leelaSeconds": 0,
+      "leelaPositions": 5
     },
     "schema": [
       {
@@ -43,6 +45,24 @@
         "max": 18,
         "step": 1,
         "defaultValue": 12
+      },
+      {
+        "key": "leelaSeconds",
+        "type": "integer",
+        "label": "Leela second opinion: seconds per position (0 = off)",
+        "min": 0,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 0
+      },
+      {
+        "key": "leelaPositions",
+        "type": "integer",
+        "label": "Leela second opinion: how many flagged positions to revisit",
+        "min": 0,
+        "max": 8,
+        "step": 1,
+        "defaultValue": 5
       }
     ]
   }

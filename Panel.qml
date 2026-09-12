@@ -28,6 +28,10 @@ Panel {
   readonly property string username: Model.normalizeUsername(setting("username", ""))
   readonly property string timeClass: Model.normalizeTimeClass(setting("timeClass", "auto"))
   readonly property int depth: Model.normalizeDepth(setting("depth", 12))
+  // 0 seconds disables the Leela pass entirely; Stockfish stays the primary
+  // engine either way.
+  readonly property int leelaSeconds: Model.normalizeLeelaSeconds(setting("leelaSeconds", 0))
+  readonly property int leelaPositions: Model.normalizeLeelaPositions(setting("leelaPositions", 5))
   readonly property var ratingRows: Model.ratingRows(status)
   readonly property var extraRows: Model.extraStatRows(status)
   readonly property var games: status.games || []
@@ -128,7 +132,9 @@ Panel {
       reviewScript,
       "--username", username,
       "--time-class", timeClass,
-      "--depth", String(depth)
+      "--depth", String(depth),
+      "--leela-seconds", String(leelaSeconds),
+      "--leela-positions", String(leelaPositions)
     ]
     if (gameUrl) argv.push("--game-url", gameUrl)
     return argv

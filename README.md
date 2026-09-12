@@ -57,13 +57,53 @@ Inline on the `ochessy` entry in `~/.config/omarchy/shell.json`:
   "id": "ochessy",
   "username": "yourname",
   "timeClass": "auto",
-  "depth": 12
+  "depth": 12,
+  "leelaSeconds": 0,
+  "leelaPositions": 5
 }
 ```
+
+The keys sit next to `"id"`, not inside a nested `settings` object:
+`BarModel.entrySettings()` hands the widget every key of the layout entry except
+`id`, so a nested object would arrive as a setting literally named `settings`
+and the real keys would silently fall back to their defaults.
 
 - `username` — Chess.com handle
 - `timeClass` — `auto` uses the last played pool; otherwise `bullet`, `blitz`, `rapid`, or `daily`
 - `depth` — Stockfish depth (8–18, default 12)
+- `leelaSeconds` — seconds Leela spends per flagged position, `0` disables it (see below)
+- `leelaPositions` — how many of the worst positions Leela revisits (0–8, default 5)
+
+## Leela second opinion (optional)
+
+Stockfish stays the primary engine and always does the full-game pass. When
+`leelaSeconds` is greater than zero and [`lc0`](https://lczero.org/) is on
+`PATH`, the worst positions Stockfish flagged are replayed through Leela and
+the report gains a section comparing the two.
+
+Only the flagged positions are revisited, never the whole game: Leela is a
+neural engine and wants time or nodes rather than the fixed depth the Stockfish
+pass uses, so a full-game run at comparable strength would take minutes. A time
+limit is also the only limit that behaves the same on the CPU (openblas) and
+CUDA builds.
+
+The useful signal is the disagreement. When Leela likes a different move, or
+rates the move you played far less harshly than Stockfish did, that position
+was usually a real decision rather than a tactical oversight.
+
+```sh
+omarchy pkg aur add lc0        # pulls lc0-network, the weights, along with it
+```
+
+On hybrid graphics the engine has to be launched on the discrete GPU, so point
+the plugin at a launcher instead of the bare binary:
+
+```sh
+export OCHESSY_LEELA_CMD="prime-run lc0"
+```
+
+If `lc0` is missing the review still runs; the report says so on one line and
+the Stockfish analysis is unaffected.
 
 ## Lessons
 
