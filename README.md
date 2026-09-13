@@ -59,7 +59,8 @@ Inline on the `ochessy` entry in `~/.config/omarchy/shell.json`:
   "timeClass": "auto",
   "depth": 12,
   "leelaSeconds": 0,
-  "leelaPositions": 5
+  "leelaPositions": 5,
+  "moveTime": 0
 }
 ```
 
@@ -73,6 +74,39 @@ and the real keys would silently fall back to their defaults.
 - `depth` — Stockfish depth (8–18, default 12)
 - `leelaSeconds` — seconds Leela spends per flagged position, `0` disables it (see below)
 - `leelaPositions` — how many of the worst positions Leela revisits (0–8, default 5)
+- `moveTime` — seconds per position instead of a fixed depth, `0` uses `depth` (0–5)
+
+## What a review tells you
+
+Every position in the game is analysed once, which costs the engine the same as
+the old two-calls-per-played-move loop but yields three things instead of one:
+
+**Your mistakes**, ranked by what they cost. Centipawn loss is measured on evals
+clamped to ±1000, so a won game does not fill with phantom blunders: trading a
+mate in 1 for a +16 endgame costs nothing, because it costs nothing.
+
+**Chances you had.** Your opponent's mistakes are scored too, and the engine's
+pick in the position right after each one is the punishment that was available.
+Comparing it with what you actually played says whether you took it. In most
+games this is the most actionable section — missed chances outnumber own
+blunders.
+
+**How the game swung**, as a one-row eval curve from your side of the board.
+
+Reviews are cached under `~/.cache/ochessy/reviews/`, keyed by the game and by
+the effort spent on it, so re-opening one is instant rather than a fresh
+analysis. `--refresh` forces a re-run.
+
+## Trends
+
+```sh
+python3 scripts/ochessy.py trends --username yourname
+```
+
+Reads the cached reviews and reports what holds across games rather than within
+one: average accuracy and whether it is moving, blunders and missed chances per
+game, the phase that keeps costing the most, and the themes that keep coming
+back. The panel shows a short form of the same thing.
 
 ## Leela second opinion (optional)
 

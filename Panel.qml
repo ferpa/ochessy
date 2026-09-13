@@ -32,6 +32,10 @@ Panel {
   // engine either way.
   readonly property int leelaSeconds: Model.normalizeLeelaSeconds(setting("leelaSeconds", 0))
   readonly property int leelaPositions: Model.normalizeLeelaPositions(setting("leelaPositions", 5))
+  // Seconds per position instead of a fixed depth. Depth 18 costs 0.05s in a
+  // simple endgame and 0.8s in a sharp middlegame, so a time budget spends
+  // the effort where the position actually needs it.
+  readonly property real moveTime: Model.normalizeMoveTime(setting("moveTime", 0))
   readonly property var ratingRows: Model.ratingRows(status)
   readonly property var extraRows: Model.extraStatRows(status)
   readonly property var games: status.games || []
@@ -134,10 +138,46 @@ Panel {
       "--time-class", timeClass,
       "--depth", String(depth),
       "--leela-seconds", String(leelaSeconds),
-      "--leela-positions", String(leelaPositions)
+      "--leela-positions", String(leelaPositions),
+      "--move-time", String(moveTime)
     ]
     if (gameUrl) argv.push("--game-url", gameUrl)
     return argv
+  }
+
+  // A review runs detached in its own terminal, so the panel cannot watch the
+  // process. It can watch the result: a finished review lands in the cache and
+  // bumps the stored-review count, which is what clears this flag.
+  property bool reviewPending: false
+  property int reviewBaseline: 0
+  property int reviewWaited: 0
+
+  function markReviewStarted() {
+    var trend = root.status ? root.status.trend : null
+    root.reviewBaseline = trend ? Number(trend.reviews || 0) : 0
+    root.reviewWaited = 0
+    root.reviewPending = true
+  }
+
+  function noteStatusArrived() {
+    if (!root.reviewPending) return
+    var trend = root.status ? root.status.trend : null
+    if (trend && Number(trend.reviews || 0) > root.reviewBaseline) root.reviewPending = false
+  }
+
+  Timer {
+    id: pendingTimer
+    interval: 5000
+    repeat: true
+    running: root.reviewPending
+    onTriggered: {
+      root.reviewWaited += 1
+      if (root.reviewWaited > 60) {
+        root.reviewPending = false
+        return
+      }
+      root.refresh()
+    }
   }
 
   function reviewLast() {
@@ -146,6 +186,7 @@ Panel {
       return
     }
     Util.execArgv(reviewArgv(""))
+    root.markReviewStarted()
   }
 
   function reviewGame(game) {
@@ -155,6 +196,7 @@ Panel {
     }
     var url = game && game.url ? String(game.url) : ""
     Util.execArgv(reviewArgv(url))
+    root.markReviewStarted()
   }
 
   function reviewGameAt(index) {
@@ -212,7 +254,10 @@ Panel {
   onTimeClassChanged: if (opened) refresh()
 
   Timer {
-    interval: root.opened ? 120000 : 300000
+    // Closed, nothing is on screen but the chip, and the API data behind it
+    // is cached for minutes anyway: polling every five minutes forever was
+    // spending requests nobody was reading.
+    interval: root.opened ? 120000 : 900000
     repeat: true
     running: root.username !== ""
     triggeredOnStart: true
@@ -236,6 +281,7 @@ Panel {
       if (exitCode !== 0 && !parsed.lastError)
         parsed.lastError = String(statusStderr.text || "Could not load Chess.com stats").trim()
       root.status = parsed
+      root.noteStatusArrived()
     }
   }
 
@@ -465,6 +511,78 @@ Panel {
             }
           }
 
+          Text {
+            visible: root.reviewPending
+            width: parent.width
+            text: "Reviewing… the report opens in a terminal, and lands here when it finishes."
+            color: root.dim
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          PanelSeparator { foreground: root.contentForeground }
+
+          PanelSectionHeader {
+            text: "TRENDS"
+            foreground: root.contentForeground
+            fontFamily: root.contentFontFamily
+          }
+
+          Text {
+            visible: Model.trendHeadline(root.status) === ""
+            width: parent.width
+            text: "Review a few games and what repeats across them shows up here."
+            color: root.dim
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          Column {
+            visible: Model.trendHeadline(root.status) !== ""
+            width: parent.width
+            spacing: 3
+
+            Text {
+              width: parent.width
+              text: Model.trendHeadline(root.status)
+              color: root.contentForeground
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+              elide: Text.ElideRight
+            }
+
+            Text {
+              width: parent.width
+              text: Model.trendDetail(root.status)
+              color: root.dim
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+
+            Text {
+              visible: Model.trendThemes(root.status) !== ""
+              width: parent.width
+              text: "Recurring: " + Model.trendThemes(root.status)
+              color: root.dim
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+
+            Text {
+              visible: Model.ratingSparkline(root.status) !== ""
+              width: parent.width
+              text: Model.ratingSparkline(root.status) + "  " + root.timeClass
+              color: Color.accent
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.body
+            }
+          }
+
           PanelSeparator { foreground: root.contentForeground }
 
           PanelSectionHeader {
@@ -495,7 +613,9 @@ Panel {
               bordered: true
               leftAlign: true
               hasCursor: root.cursorActive && root.cursorIndex === (root.gameOffset + index)
-              foreground: root.contentForeground
+              foreground: modelData.result === "win"
+                ? Color.accent
+                : (modelData.result === "loss" ? Color.urgent : root.contentForeground)
               fontFamily: root.contentFontFamily
               tooltipText: Model.gameDetail(modelData)
               onClicked: root.reviewGame(modelData)

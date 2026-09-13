@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import os
+import hashlib
 import re
 import shlex
 import shutil
@@ -34,6 +35,16 @@ TIME_CLASSES = ("bullet", "blitz", "rapid", "daily")
 LEELA_ENV = "OCHESSY_LEELA_CMD"
 LEELA_MAX_SECONDS = 30
 LEELA_MAX_POSITIONS = 8
+# Centipawn loss is measured on evals clamped to this, because past a rook the
+# position is decided and "worse" stops costing anything real. Without it a won
+# game is full of phantom blunders: trading a mate in 1 for a +16 endgame scores
+# as -8357cp and buries the moves that actually cost something.
+CPL_CLAMP = 1000
+REVIEWS_DIR = CACHE_DIR / "reviews"
+# Bump when the review payload shape changes, so old files are ignored instead
+# of rendering half-empty sections.
+REVIEW_FORMAT = 2
+LESSON_HOSTS = frozenset({"chess.com", "lichess.org", "chesstempo.com", "saintlouischessclub.org"})
 DRAW_RESULTS = {
     "agreed",
     "stalemate",
@@ -78,6 +89,128 @@ def write_cache(name: str, payload: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     tmp.replace(path)
+
+
+def review_key(game: dict[str, Any], depth: int, move_time: float) -> str:
+    """Cache key for one analysis: the game plus the effort spent on it.
+
+    Leela is deliberately not part of the key. Its pass runs off the stored
+    errors, which carry their own FEN, so asking for a second opinion later
+    reuses the Stockfish work instead of repeating it.
+    """
+    seed = "|".join([
+        str(game.get("url") or game.get("uuid") or game.get("endTime") or ""),
+        str(depth),
+        f"{move_time:.2f}",
+        str(REVIEW_FORMAT),
+    ])
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def read_review(key: str) -> dict[str, Any] | None:
+    path = REVIEWS_DIR / f"{key}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("format") != REVIEW_FORMAT:
+        return None
+    return payload.get("review") if isinstance(payload.get("review"), dict) else None
+
+
+def write_review(key: str, review: dict[str, Any]) -> None:
+    try:
+        REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+        path = REVIEWS_DIR / f"{key}.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"format": REVIEW_FORMAT, "saved": int(time.time()), "review": review}),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def stored_reviews(username: str, limit: int = 40) -> list[dict[str, Any]]:
+    """Every cached review for this user, newest game first."""
+    out: list[dict[str, Any]] = []
+    try:
+        paths = sorted(REVIEWS_DIR.glob("*.json"))
+    except OSError:
+        return out
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("format") != REVIEW_FORMAT:
+            continue
+        review = payload.get("review")
+        if not isinstance(review, dict):
+            continue
+        if normalize_username(str(review.get("username") or "")) != normalize_username(username):
+            continue
+        out.append(review)
+    out.sort(key=lambda item: int((item.get("game") or {}).get("endTime") or 0), reverse=True)
+    return out[:limit]
+
+
+def trends_payload(username: str, limit: int = 20) -> dict[str, Any]:
+    """What the cached reviews say across games, rather than within one.
+
+    A single review tells you what happened; this is the only thing that can
+    tell you whether it keeps happening.
+    """
+    reviews = stored_reviews(username, limit=limit)
+    empty = {
+        "reviews": 0,
+        "accuracy": 0.0,
+        "accuracyTrend": 0.0,
+        "themes": [],
+        "worstPhase": "",
+        "blunders": 0.0,
+        "missedChances": 0.0,
+        "recent": [],
+    }
+    if not reviews:
+        return empty
+
+    accuracies = [float(item.get("accuracy") or 0) for item in reviews]
+    theme_totals: dict[str, int] = {}
+    phase_totals: dict[str, int] = {}
+    blunders = 0
+    missed = 0
+    for item in reviews:
+        for name in (item.get("themes") or [])[:3]:
+            theme_totals[name] = theme_totals.get(name, 0) + 1
+        for phase, loss in (item.get("phaseLoss") or {}).items():
+            phase_totals[phase] = phase_totals.get(phase, 0) + int(loss or 0)
+        blunders += int((item.get("counts") or {}).get("blunder") or 0)
+        missed += int(item.get("missedChances") or 0)
+
+    # Newest half against oldest half: enough to say "going up" without
+    # pretending a handful of games is a regression line.
+    half = max(1, len(accuracies) // 2)
+    trend = round(sum(accuracies[:half]) / half - sum(accuracies[-half:]) / half, 1)
+
+    return {
+        "reviews": len(reviews),
+        "accuracy": round(sum(accuracies) / len(accuracies), 1),
+        "accuracyTrend": trend,
+        "themes": [name for name, _ in sorted(theme_totals.items(), key=lambda kv: kv[1], reverse=True)[:3]],
+        "worstPhase": max(phase_totals, key=lambda key: phase_totals[key]) if phase_totals else "",
+        "blunders": round(blunders / len(reviews), 1),
+        "missedChances": round(missed / len(reviews), 1),
+        "recent": [
+            {
+                "accuracy": item.get("accuracy"),
+                "result": (item.get("game") or {}).get("result"),
+                "endTime": (item.get("game") or {}).get("endTime"),
+            }
+            for item in reviews[:10]
+        ],
+    }
 
 
 def require_username(value: str) -> str:
@@ -487,6 +620,7 @@ def status_payload(username: str, time_class: str) -> dict[str, Any]:
         "packagesOk": not missing,
         "missingPackages": missing,
         "lastError": "",
+        "trend": trends_payload(username, limit=20),
     }
 
 
@@ -497,7 +631,25 @@ def load_lessons() -> dict[str, Any]:
         return {"themes": {}, "ratingTracks": {}}
 
 
+def lesson_host_ok(url: str) -> bool:
+    """Only the hosts the bundled catalogue already points at.
+
+    verify-lessons is the one place in this file that fetches a URL which is
+    not api.chess.com, and it followed redirects anywhere. The catalogue is
+    static and small, so pinning its hosts costs nothing and keeps the rule
+    "this plugin talks to Chess.com and the lesson sites, full stop" true.
+    """
+    try:
+        host = urlparse(url).netloc.lower().split(":")[0]
+    except ValueError:
+        return False
+    return host in LESSON_HOSTS or any(host.endswith("." + allowed) for allowed in LESSON_HOSTS)
+
+
 def lesson_url_ok(url: str) -> bool:
+    if not lesson_host_ok(url):
+        eprint(f"Refusing lesson URL outside the allowed hosts: {url}")
+        return False
     req = urllib.request.Request(
         url,
         method="HEAD",
@@ -619,6 +771,10 @@ def accuracy_from_cpls(cpls: list[int]) -> float:
     return round(sum(scores) / len(scores), 1)
 
 
+def clamp_eval(cp: int) -> int:
+    return max(-CPL_CLAMP, min(CPL_CLAMP, cp))
+
+
 def score_cp(info: Any, color: Any) -> int:
     score = info.get("score") if isinstance(info, dict) else None
     if score is None:
@@ -628,6 +784,22 @@ def score_cp(info: Any, color: Any) -> int:
     if value is None:
         return 0
     return int(value)
+
+
+def wdl_percentages(info: Any, color: Any) -> dict[str, int] | None:
+    """Win/draw/loss as whole percents from `color`'s side, or None."""
+    wdl = info.get("wdl") if isinstance(info, dict) else None
+    if wdl is None:
+        return None
+    try:
+        pov = wdl.pov(color)
+        return {
+            "win": round(pov.winning_chance() * 100),
+            "draw": round(pov.drawing_chance() * 100),
+            "loss": round(pov.losing_chance() * 100),
+        }
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def leela_second_opinion(
@@ -671,6 +843,14 @@ def leela_second_opinion(
         result["error"] = str(exc)[:200]
         return result
 
+    # Win/draw/loss is what makes a neural engine worth consulting: "you still
+    # draw this a third of the time" is a human statement in a way that a
+    # centipawn number never is. lc0 only emits it when asked.
+    try:
+        engine.configure({"UCI_ShowWDL": True})
+    except Exception:  # noqa: BLE001
+        pass
+
     limit = chess.engine.Limit(time=float(seconds))
     try:
         for position, err in enumerate(targets, start=1):
@@ -690,15 +870,17 @@ def leela_second_opinion(
                 except ValueError:
                     best_san = best.uci()
             before = score_cp(info, mover)
+            wdl_before = wdl_percentages(info, mover)
 
             board.push(chess.Move.from_uci(err["uci"]))
             after_info = engine.analyse(board, limit)
             if isinstance(after_info, list):
                 after_info = after_info[0]
             after = score_cp(after_info, mover)
+            wdl_after = wdl_percentages(after_info, mover)
             board.pop()
 
-            cpl = max(0, before - after)
+            cpl = max(0, clamp_eval(before) - clamp_eval(after))
             result["entries"].append(
                 {
                     "ply": err.get("ply"),
@@ -712,6 +894,8 @@ def leela_second_opinion(
                     "evalAfter": after,
                     "agrees": bool(best_san) and best_san == err.get("best"),
                     "verdict": classify_cpl(cpl),
+                    "wdlBefore": wdl_before,
+                    "wdlAfter": wdl_after,
                 }
             )
     except Exception as exc:  # noqa: BLE001
@@ -729,12 +913,31 @@ def leela_second_opinion(
     return result
 
 
+def opening_from_headers(headers: Any) -> dict[str, str]:
+    """ECO code and a readable opening name from the Chess.com PGN headers.
+
+    Chess.com ships the opening as a URL slug rather than a name, so the name
+    is recovered from the last path segment of ECOUrl. The slug also carries
+    the moves ("...-3.Nf3"), which are dropped: the family name is what is
+    worth showing.
+    """
+    eco = str((headers or {}).get("ECO", "") or "").strip()
+    url = str((headers or {}).get("ECOUrl", "") or "").strip()
+    name = ""
+    if url:
+        slug = url.rstrip("/").rsplit("/", 1)[-1]
+        slug = re.sub(r"-?\d+\.[^-]*", "", slug)
+        name = re.sub(r"\s+", " ", slug.replace("-", " ")).strip()
+    return {"eco": eco, "name": name, "url": url}
+
+
 def analyze_game(
     game: dict[str, Any],
     username: str,
     depth: int,
     leela_seconds: int = 0,
     leela_positions: int = 0,
+    move_time: float = 0.0,
 ) -> dict[str, Any]:
     missing = missing_packages()
     if missing:
@@ -743,10 +946,10 @@ def analyze_game(
     import chess
     import chess.engine
     import chess.pgn
-    import io
+    import io as _io
 
     pgn_text = str(game.get("pgn") or "")
-    parsed = chess.pgn.read_game(io.StringIO(pgn_text))
+    parsed = chess.pgn.read_game(_io.StringIO(pgn_text))
     if parsed is None:
         raise RuntimeError("Could not parse the game PGN.")
 
@@ -755,87 +958,130 @@ def analyze_game(
     if not engine_path:
         raise RuntimeError("stockfish is not on PATH")
 
+    moves = list(parsed.mainline_moves())
+    opening = opening_from_headers(parsed.headers)
+    limit = (
+        chess.engine.Limit(time=move_time)
+        if move_time > 0
+        else chess.engine.Limit(depth=depth)
+    )
+
+    # One analysis per position, not two per move played. Position i is both
+    # "after move i-1" and "before move i", so a single sequential pass gives
+    # the centipawn loss for *both* players plus the eval curve, at the engine
+    # cost the old two-calls-per-user-move loop paid for half of that.
+    #
+    # Threads=1/Hash=64 is deliberate: at a fixed depth extra threads widen the
+    # search instead of shortening it, and the table is cleared between calls,
+    # so a bigger hash is paid for once per position and never amortised. Both
+    # measured as ~2x slower over a full game.
     engine = chess.engine.SimpleEngine.popen_uci(engine_path)
+    curve: list[int] = []
+    best_moves: list[Any] = []
     board = parsed.board()
+    try:
+        engine.configure({"Threads": 1, "Hash": 64})
+        for index in range(len(moves) + 1):
+            eprint(f"Analyzing position {index + 1}/{len(moves) + 1}…")
+            if board.is_game_over():
+                outcome = board.outcome()
+                winner = outcome.winner if outcome is not None else None
+                curve.append(0 if winner is None else (10000 if winner == chess.WHITE else -10000))
+                best_moves.append(None)
+            else:
+                info = engine.analyse(board, limit, multipv=1)
+                if isinstance(info, list):
+                    info = info[0]
+                curve.append(score_cp(info, chess.WHITE))
+                pv = info.get("pv") or []
+                best_moves.append(pv[0] if pv else None)
+            if index < len(moves):
+                board.push(moves[index])
+    finally:
+        engine.quit()
+
     errors: list[dict[str, Any]] = []
+    chances: list[dict[str, Any]] = []
     cpls: list[int] = []
     counts = {"inaccuracy": 0, "mistake": 0, "blunder": 0, "ok": 0}
     phase_loss = {"opening": 0, "middlegame": 0, "endgame": 0}
     theme_loss: dict[str, int] = {}
-    moves = list(parsed.mainline_moves())
-    total_user = sum(1 for i, _ in enumerate(moves) if (i % 2 == 0) == (user_color == chess.WHITE))
-    seen_user = 0
 
-    try:
-        engine.configure({"Threads": 1, "Hash": 64})
-        for ply, move in enumerate(moves, start=1):
-            is_user = board.turn == user_color
-            if is_user:
-                seen_user += 1
-                eprint(f"Analyzing move {seen_user}/{max(total_user, 1)}…")
-                info = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=1)
-                if isinstance(info, list):
-                    info = info[0]
-                best = None
-                pv = info.get("pv") or []
-                if pv:
-                    best = pv[0]
-                before = score_cp(info, user_color)
-                try:
-                    san = board.san(move)
-                except ValueError:
-                    san = move.uci()
-                best_san = ""
-                if best is not None:
-                    try:
-                        best_san = board.san(best)
-                    except ValueError:
-                        best_san = best.uci()
-                phase = phase_for_board(board, ply)
-                tags = []
-                board.push(move)
-                after_info = engine.analyse(board, chess.engine.Limit(depth=depth))
-                if isinstance(after_info, list):
-                    after_info = after_info[0]
-                after = score_cp(after_info, user_color)
-                cpl = max(0, before - after)
-                cpls.append(cpl)
-                kind = classify_cpl(cpl)
-                counts[kind] = counts.get(kind, 0) + 1
-                phase_loss[phase] = phase_loss.get(phase, 0) + cpl
-                board.pop()
-                tags = tag_move(board, move, best, cpl, ply, user_color)
-                for tag in tags:
-                    theme_loss[tag] = theme_loss.get(tag, 0) + cpl
-                if kind != "ok":
-                    tip = move_tip(kind, san, best_san, cpl, tags, phase)
-                    errors.append(
-                        {
-                            # FEN/UCI of the position *before* the played move:
-                            # the Leela pass replays only these, instead of
-                            # walking the whole game a second time.
-                            "fen": board.fen(),
-                            "uci": move.uci(),
-                            "ply": ply,
-                            "moveNumber": (ply + 1) // 2,
-                            "san": san,
-                            "best": best_san,
-                            "cpl": cpl,
-                            "kind": kind,
-                            "phase": phase,
-                            "themes": tags,
-                            "evalBefore": before,
-                            "evalAfter": after,
-                            "tip": tip,
-                        }
-                    )
-                board.push(move)
-            else:
-                board.push(move)
-    finally:
-        engine.quit()
+    def san_of(position: Any, move: Any) -> str:
+        if move is None:
+            return ""
+        try:
+            return position.san(move)
+        except ValueError:
+            return move.uci()
+
+    board = parsed.board()
+    for index, move in enumerate(moves):
+        ply = index + 1
+        mover = board.turn
+        sign = 1 if mover == chess.WHITE else -1
+        before = sign * curve[index]
+        after = sign * curve[index + 1]
+        # Reported evals stay honest; only the loss is measured on the clamp.
+        cpl = max(0, clamp_eval(before) - clamp_eval(after))
+        best = best_moves[index]
+        san = san_of(board, move)
+        best_san = san_of(board, best)
+        phase = phase_for_board(board, ply)
+        kind = classify_cpl(cpl)
+        tags = tag_move(board, move, best, cpl, ply, mover)
+
+        if mover == user_color:
+            cpls.append(cpl)
+            counts[kind] = counts.get(kind, 0) + 1
+            phase_loss[phase] = phase_loss.get(phase, 0) + cpl
+            for tag in tags:
+                theme_loss[tag] = theme_loss.get(tag, 0) + cpl
+            if kind != "ok":
+                errors.append(
+                    {
+                        # FEN/UCI of the position *before* the played move: the
+                        # Leela pass replays only these instead of walking the
+                        # whole game a second time.
+                        "fen": board.fen(),
+                        "uci": move.uci(),
+                        "ply": ply,
+                        "moveNumber": (ply + 1) // 2,
+                        "san": san,
+                        "best": best_san,
+                        "cpl": cpl,
+                        "kind": kind,
+                        "phase": phase,
+                        "themes": tags,
+                        "evalBefore": before,
+                        "evalAfter": after,
+                        "tip": move_tip(kind, san, best_san, cpl, tags, phase),
+                    }
+                )
+        elif kind in ("mistake", "blunder"):
+            # The opponent handed something over. The engine's pick in the
+            # position that followed is the punishment, so comparing it with
+            # what was actually played says whether the chance was taken.
+            after_board = board.copy()
+            after_board.push(move)
+            punish = best_moves[index + 1] if index + 1 < len(best_moves) else None
+            reply = moves[index + 1] if index + 1 < len(moves) else None
+            chances.append(
+                {
+                    "ply": ply,
+                    "moveNumber": (ply + 1) // 2,
+                    "opponentMove": san,
+                    "swing": cpl,
+                    "punish": san_of(after_board, punish),
+                    "played": san_of(after_board, reply),
+                    "taken": reply is not None and punish is not None and reply == punish,
+                    "phase": phase,
+                }
+            )
+        board.push(move)
 
     errors.sort(key=lambda item: item["cpl"], reverse=True)
+    chances.sort(key=lambda item: item["swing"], reverse=True)
     ranked_themes = [name for name, _ in sorted(theme_loss.items(), key=lambda kv: kv[1], reverse=True) if name != "general"]
     if not ranked_themes:
         ranked_themes = ["general"]
@@ -849,12 +1095,18 @@ def analyze_game(
         "game": {k: v for k, v in game.items() if k != "pgn"},
         "username": username,
         "depth": depth,
+        "moveTime": move_time,
+        "opening": opening,
         "accuracy": accuracy_from_cpls(cpls),
         "counts": counts,
         "phaseLoss": phase_loss,
         "worstPhase": worst_phase,
         "themes": ranked_themes,
         "errors": errors[:8],
+        "chances": chances[:5],
+        "missedChances": sum(1 for item in chances if not item["taken"]),
+        "evalCurve": curve,
+        "userColor": "white" if user_color == chess.WHITE else "black",
         "leela": leela,
         "tips": build_tips(errors, ranked_themes, worst_phase, counts),
         "lessons": lessons,
@@ -967,6 +1219,39 @@ def fmt_eval(cp: int) -> str:
     return f"{cp / 100:+.2f}"
 
 
+SPARK = "▁▂▃▄▅▆▇█"
+
+
+def eval_sparkline(curve: list[int], user_color: str, width: int = 64) -> str:
+    """The eval curve as one row of blocks, from the user's side of the board.
+
+    Clamped to a rook either way before scaling: past that the exact number
+    stops meaning anything, and a single mate score would otherwise flatten the
+    whole game into a straight line. Buckets are averaged rather than sampled
+    so a one-ply spike cannot fall between two samples.
+    """
+    if not curve:
+        return ""
+    sign = 1 if user_color == "white" else -1
+    points = [max(-500, min(500, sign * value)) for value in curve]
+    if len(points) > width:
+        buckets = []
+        for index in range(width):
+            low = index * len(points) // width
+            high = max(low + 1, (index + 1) * len(points) // width)
+            chunk = points[low:high]
+            buckets.append(sum(chunk) / len(chunk))
+        points = buckets
+    return "".join(SPARK[min(7, max(0, int((value + 500) / 1000 * 8)))] for value in points)
+
+
+def effort_label(review: dict[str, Any]) -> str:
+    move_time = float(review.get("moveTime") or 0)
+    if move_time > 0:
+        return f"{move_time:g}s per position"
+    return f"depth {review.get('depth')}"
+
+
 def leela_header(review: dict[str, Any]) -> str:
     leela = review.get("leela") or {}
     if leela.get("status") != "ok" or not leela.get("entries"):
@@ -989,12 +1274,16 @@ def render_report(review: dict[str, Any]) -> str:
 
     lines = [
         f"{bold}OChessy game review{reset}",
-        f"{dim}Local Stockfish depth {review.get('depth')}"
+        f"{dim}Local Stockfish {effort_label(review)}"
         f"{leela_header(review)} — not Chess.com Game Review{reset}",
         "",
         f"{bold}{game.get('white', '?')} vs {game.get('black', '?')}{reset}",
         f"{game.get('timeClass', '')} · you played {game.get('userColor', '')} · {game.get('result', '')}",
     ]
+    opening = review.get("opening") or {}
+    if opening.get("name") or opening.get("eco"):
+        label = " ".join(bit for bit in (opening.get("eco", ""), opening.get("name", "")) if bit)
+        lines.append(f"{dim}{label}{reset}")
     if game.get("url"):
         lines.append(str(game["url"]))
     lines += [
@@ -1002,6 +1291,18 @@ def render_report(review: dict[str, Any]) -> str:
         f"Estimated accuracy  {bold}{review.get('accuracy')}%{reset}",
         f"Inaccuracies {counts.get('inaccuracy', 0)}   Mistakes {counts.get('mistake', 0)}   Blunders {counts.get('blunder', 0)}",
         f"Biggest phase loss: {review.get('worstPhase')}",
+    ]
+
+    spark = eval_sparkline(review.get("evalCurve") or [], review.get("userColor", "white"))
+    if spark:
+        lines += [
+            "",
+            f"{bold}How the game swung{reset}{dim}  (your side; up is better for you){reset}",
+            f"  {cyan}{spark}{reset}",
+            f"  {dim}move 1{' ' * max(0, len(spark) - 14)}move {max(1, (len(review.get('evalCurve') or []) - 1) // 2)}{reset}",
+        ]
+
+    lines += [
         "",
         f"{bold}What to work on{reset}",
     ]
@@ -1019,6 +1320,24 @@ def render_report(review: dict[str, Any]) -> str:
                 f"({fmt_eval(err.get('evalBefore', 0))} → {fmt_eval(err.get('evalAfter', 0))}, -{err.get('cpl')} cp)"
             )
             lines.append(f"    {err.get('tip')}")
+
+    chances = review.get("chances") or []
+    if chances:
+        missed = int(review.get("missedChances") or 0)
+        lines += [
+            "",
+            f"{bold}Chances you had{reset}"
+            f"{dim}  (your opponent slipped {'once' if missed == 1 else str(missed) + ' times'} you did not punish){reset}",
+        ]
+        for chance in chances:
+            if chance.get("taken"):
+                mark = f"{green}you took it{reset}"
+            else:
+                mark = f"{yellow}you played {chance.get('played') or '—'}{reset}"
+            lines.append(
+                f"  Move {chance.get('moveNumber')}  they played {chance.get('opponentMove')}"
+                f"  (-{chance.get('swing')} cp for them)  →  {bold}{chance.get('punish') or '—'}{reset}  ·  {mark}"
+            )
 
     leela = review.get("leela") or {}
     status = leela.get("status")
@@ -1040,6 +1359,11 @@ def render_report(review: dict[str, Any]) -> str:
                 f"Stockfish -{item.get('stockfishCpl')} cp  ·  "
                 f"Leela -{item.get('leelaCpl')} cp  ·  {verdict}"
             )
+            wdl = item.get("wdlAfter")
+            if wdl:
+                lines.append(
+                    f"    {dim}Leela from here: win {wdl['win']}%  draw {wdl['draw']}%  loss {wdl['loss']}%{reset}"
+                )
             gap = int(item.get("stockfishCpl") or 0) - int(item.get("leelaCpl") or 0)
             if gap >= 80:
                 lines.append(
@@ -1113,17 +1437,35 @@ def cmd_review(args: argparse.Namespace) -> int:
     if not username:
         eprint("Set a Chess.com username first.")
         return 2
+    depth = max(8, min(18, int(args.depth)))
+    move_time = max(0.0, min(5.0, float(args.move_time)))
+    leela_seconds = max(0, min(LEELA_MAX_SECONDS, int(args.leela_seconds)))
+    leela_positions = max(0, min(LEELA_MAX_POSITIONS, int(args.leela_positions)))
     try:
         game = find_game(username, game_url=args.game_url or "", index=args.index)
         if not game.get("pgn"):
             raise RuntimeError("That game has no PGN in the public archive.")
-        review = analyze_game(
-            game,
-            username,
-            depth=max(8, min(18, int(args.depth))),
-            leela_seconds=max(0, min(LEELA_MAX_SECONDS, int(args.leela_seconds))),
-            leela_positions=max(0, min(LEELA_MAX_POSITIONS, int(args.leela_positions))),
-        )
+        key = review_key(game, depth, move_time)
+        review = None if args.refresh else read_review(key)
+        if review is None:
+            review = analyze_game(
+                game,
+                username,
+                depth=depth,
+                leela_seconds=leela_seconds,
+                leela_positions=leela_positions,
+                move_time=move_time,
+            )
+            write_review(key, review)
+        else:
+            eprint("Reusing the stored analysis for this game.")
+            # The stored errors carry their own FEN, so a second opinion asked
+            # for later runs on its own without repeating the Stockfish pass.
+            if leela_seconds > 0 and (review.get("leela") or {}).get("status") != "ok":
+                review["leela"] = leela_second_opinion(
+                    review.get("errors") or [], leela_seconds, leela_positions
+                )
+                write_review(key, review)
     except Exception as exc:  # noqa: BLE001
         eprint(str(exc))
         return 1
@@ -1131,6 +1473,67 @@ def cmd_review(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(review, indent=2))
         return 0
+    if args.output:
+        Path(args.output).write_text(text + "\n", encoding="utf-8")
+    else:
+        print(text)
+    return 0
+
+
+def render_trends(trend: dict[str, Any]) -> str:
+    bold, dim, reset = "\033[1m", "\033[2m", "\033[0m"
+    green, yellow, cyan = "\033[32m", "\033[33m", "\033[36m"
+    if not trend.get("reviews"):
+        return (
+            f"{bold}OChessy trends{reset}\n\n"
+            f"  No stored reviews yet. Review a few games and they accumulate here.\n"
+        )
+    direction = trend.get("accuracyTrend") or 0.0
+    if direction > 0.5:
+        arrow = f"{green}▲ {direction:+.1f} vs your older half{reset}"
+    elif direction < -0.5:
+        arrow = f"{yellow}▼ {direction:+.1f} vs your older half{reset}"
+    else:
+        arrow = f"{dim}flat{reset}"
+    lines = [
+        f"{bold}OChessy trends{reset}",
+        f"{dim}Across {trend['reviews']} stored review(s){reset}",
+        "",
+        f"Average accuracy   {bold}{trend['accuracy']}%{reset}   {arrow}",
+        f"Blunders per game  {trend['blunders']}",
+        f"Chances missed     {trend['missedChances']} per game",
+    ]
+    if trend.get("worstPhase"):
+        lines.append(f"Weakest phase      {trend['worstPhase']}")
+    if trend.get("themes"):
+        lines += ["", f"{bold}{cyan}What keeps coming back{reset}"]
+        for name in trend["themes"]:
+            lines.append(f"  • {name}")
+    recent = trend.get("recent") or []
+    if recent:
+        marks = {"win": f"{green}W{reset}", "loss": f"{yellow}L{reset}"}
+        lines += [
+            "",
+            f"{bold}Last reviewed{reset}",
+            "  " + "  ".join(
+                f"{marks.get(str(item.get('result')), 'D')}{item.get('accuracy')}"
+                for item in recent
+            ),
+        ]
+    lines += ["", f"{dim}Press q to close.{reset}", ""]
+    return "\n".join(lines)
+
+
+def cmd_trends(args: argparse.Namespace) -> int:
+    username = normalize_username(args.username)
+    if not username:
+        eprint("Set a Chess.com username first.")
+        return 2
+    trend = trends_payload(username, limit=max(1, min(100, int(args.limit))))
+    if args.json:
+        print(json.dumps(trend, indent=2))
+        return 0
+    text = render_trends(trend)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     else:
@@ -1160,6 +1563,18 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--output", default="")
     review.add_argument("--json", action="store_true")
     review.set_defaults(func=cmd_review)
+
+    review.add_argument("--move-time", type=float, default=0.0,
+                        help="seconds per position instead of a fixed depth (0 uses --depth)")
+    review.add_argument("--refresh", action="store_true",
+                        help="re-analyse even when a stored review exists")
+
+    trends = sub.add_parser("trends")
+    trends.add_argument("--username", required=True)
+    trends.add_argument("--limit", type=int, default=20)
+    trends.add_argument("--output", default="")
+    trends.add_argument("--json", action="store_true")
+    trends.set_defaults(func=cmd_trends)
 
     verify = sub.add_parser("verify-lessons")
     verify.set_defaults(func=cmd_verify_lessons)

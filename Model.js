@@ -102,6 +102,13 @@ function normalizeDepth(value) {
   return n
 }
 
+function normalizeMoveTime(value) {
+  var n = Number(value)
+  if (!isFinite(n) || n < 0) n = 0
+  if (n > 5) n = 5
+  return Math.round(n * 10) / 10
+}
+
 function normalizeLeelaSeconds(value) {
   var n = parseInt(String(value || ""), 10)
   if (!isFinite(n)) n = 0
@@ -116,6 +123,95 @@ function normalizeLeelaPositions(value) {
   if (n < 0) n = 0
   if (n > 8) n = 8
   return n
+}
+
+var SPARK = ["\u2581", "\u2582", "\u2583", "\u2584", "\u2585", "\u2586", "\u2587", "\u2588"]
+
+// Chess.com reports both players' ratings on every game, so the user's own
+// rating comes from whichever side they were.
+function userRating(game) {
+  if (!game) return 0
+  return Number(game.userColor === "white" ? game.whiteRating : game.blackRating) || 0
+}
+
+// Oldest to newest, restricted to one pool: mixing bullet into a blitz curve
+// would draw a sawtooth that means nothing.
+function ratingSeries(status, timeClass) {
+  var games = (status && status.games) || []
+  var klass = normalizeTimeClass(timeClass)
+  var out = []
+  for (var i = games.length - 1; i >= 0; i--) {
+    var game = games[i]
+    if (!game) continue
+    if (klass !== "auto" && String(game.timeClass) !== klass) continue
+    var rating = userRating(game)
+    if (rating > 0) out.push(rating)
+  }
+  return out
+}
+
+function ratingDelta(status) {
+  var series = ratingSeries(status, status && status.timeClass)
+  if (series.length < 2) return 0
+  return series[series.length - 1] - series[series.length - 2]
+}
+
+function deltaLabel(status) {
+  var delta = ratingDelta(status)
+  if (!delta) return ""
+  return (delta > 0 ? "\u25b2" : "\u25bc") + Math.abs(delta)
+}
+
+function sparkline(values, width) {
+  if (!values || values.length < 2) return ""
+  var span = width || 16
+  var points = values.slice(Math.max(0, values.length - span))
+  var low = points[0]
+  var high = points[0]
+  for (var i = 1; i < points.length; i++) {
+    if (points[i] < low) low = points[i]
+    if (points[i] > high) high = points[i]
+  }
+  var range = high - low
+  var out = ""
+  for (var j = 0; j < points.length; j++) {
+    var level = range === 0 ? 3 : Math.round((points[j] - low) / range * 7)
+    out += SPARK[Math.max(0, Math.min(7, level))]
+  }
+  return out
+}
+
+function ratingSparkline(status) {
+  return sparkline(ratingSeries(status, status && status.timeClass), 18)
+}
+
+function trendOf(status) {
+  var trend = status && status.trend
+  return trend && typeof trend === "object" ? trend : null
+}
+
+function trendHeadline(status) {
+  var trend = trendOf(status)
+  if (!trend || !trend.reviews) return ""
+  var direction = Number(trend.accuracyTrend || 0)
+  var arrow = direction > 0.5 ? " \u25b2" : (direction < -0.5 ? " \u25bc" : "")
+  return trend.accuracy + "% avg accuracy" + arrow + " \u00b7 " + trend.reviews + " reviewed"
+}
+
+function trendDetail(status) {
+  var trend = trendOf(status)
+  if (!trend || !trend.reviews) return ""
+  var bits = []
+  if (trend.blunders) bits.push(trend.blunders + " blunders/game")
+  if (trend.missedChances) bits.push(trend.missedChances + " chances missed/game")
+  if (trend.worstPhase) bits.push("weakest: " + trend.worstPhase)
+  return bits.join(" \u00b7 ")
+}
+
+function trendThemes(status) {
+  var trend = trendOf(status)
+  if (!trend || !trend.themes || !trend.themes.length) return ""
+  return trend.themes.join(", ").replace(/_/g, " ")
 }
 
 function pad2(n) {

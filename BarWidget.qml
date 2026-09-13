@@ -12,10 +12,15 @@ BarWidget {
   readonly property var status: panelLoader.item ? panelLoader.item.status : Model.defaultStatus()
   readonly property string tooltipLabel: Model.barTooltip(status)
   readonly property string pillText: Model.barLabel(status)
-  readonly property color chipFill: Color.accent
+  // Rating move since the previous game in the same pool. The number alone
+  // says where you are; this says which way you are going, which is the part
+  // worth a glance from across the desk.
+  readonly property string deltaText: Model.deltaLabel(status)
+  readonly property int ratingDelta: Model.ratingDelta(status)
+  readonly property color chipFill: root.ratingDelta < 0 ? Color.urgent : Color.accent
   readonly property color chipInk: Color.bar.text
   readonly property int chipH: Math.max(22, root.barSize - 8)
-  readonly property int chipW: Math.max(48, Math.round(chipH * 2.15))
+  readonly property int chipW: Math.max(48, Math.round(chipH * 2.15) + (root.deltaText === "" ? 0 : 24))
 
   function injectPanel() {
     var target = panelLoader.item
@@ -142,6 +147,16 @@ BarWidget {
           font.family: button.fontFamily
           font.pixelSize: Style.font.body
           font.bold: true
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Text {
+          visible: !root.vertical && root.deltaText !== ""
+          text: root.deltaText
+          color: root.chipInk
+          opacity: 0.75
+          font.family: button.fontFamily
+          font.pixelSize: Style.font.bodySmall
           anchors.verticalCenter: parent.verticalCenter
         }
       }

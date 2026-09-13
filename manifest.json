@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ochessy",
   "name": "OChessy",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "kingnick",
   "license": "MIT",
   "description": "Chess.com stats on the bar, local Stockfish game review with an optional Leela second opinion, and allowlisted lesson links.",
@@ -22,7 +22,8 @@
       "timeClass": "auto",
       "depth": 12,
       "leelaSeconds": 0,
-      "leelaPositions": 5
+      "leelaPositions": 5,
+      "moveTime": 0
     },
     "schema": [
       {
@@ -63,6 +64,15 @@
         "max": 8,
         "step": 1,
         "defaultValue": 5
+      },
+      {
+        "key": "moveTime",
+        "type": "number",
+        "label": "Seconds per position instead of a fixed depth (0 uses depth)",
+        "min": 0,
+        "max": 5,
+        "step": 0.5,
+        "defaultValue": 0
       }
     ]
   }

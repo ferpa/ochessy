@@ -10,6 +10,7 @@ TIME_CLASS="auto"
 DEPTH="12"
 LEELA_SECONDS="0"
 LEELA_POSITIONS="5"
+MOVE_TIME="0"
 GAME_URL=""
 INDEX="0"
 
@@ -37,6 +38,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --leela-positions)
       LEELA_POSITIONS="${2:-5}"
+      shift 2
+      ;;
+    --move-time)
+      MOVE_TIME="${2:-0}"
       shift 2
       ;;
     --game-url)
@@ -92,6 +97,7 @@ argv=(python3 "$SCRIPT_DIR/ochessy.py" review
   --depth "$DEPTH"
   --leela-seconds "$LEELA_SECONDS"
   --leela-positions "$LEELA_POSITIONS"
+  --move-time "$MOVE_TIME"
   --index "$INDEX"
   --output "$REPORT")
 if [[ -n $GAME_URL ]]; then
