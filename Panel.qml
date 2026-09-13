@@ -62,10 +62,14 @@ Panel {
   }
 
   function close() {
-    setCenterHoverRevealSuppressed(false)
+    // Hide first. Anything that throws in here used to strand the panel on
+    // screen holding an exclusive keyboard grab, which locks every window out
+    // of the keyboard until the shell is restarted; closing must not depend on
+    // the cosmetic calls that follow it.
     cursorActive = false
     editingUsername = false
     root.controller.hide()
+    setCenterHoverRevealSuppressed(false)
   }
 
   function toggle() {
@@ -80,8 +84,20 @@ Panel {
   }
 
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
-      root.bar.centerHoverRevealSuppressed = value
+    if (!root.bar) return
+    // PluginBarApi exposes this as a readonly property backed by a setter, so
+    // assigning to it throws "Cannot assign to read-only property". Use the
+    // function the API actually provides, and never let the fallback escape.
+    if (typeof root.bar.setCenterHoverRevealSuppressed === "function") {
+      root.bar.setCenterHoverRevealSuppressed(value)
+      return
+    }
+    try {
+      if ("centerHoverRevealSuppressed" in root.bar)
+        root.bar.centerHoverRevealSuppressed = value
+    } catch (error) {
+      // A bar that will not take it is not a reason to strand the panel.
+    }
   }
 
   function persistSettings(values) {
