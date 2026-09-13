@@ -767,11 +767,7 @@ def analyze_game(
     seen_user = 0
 
     try:
-        # Scale Threads/Hash to the host instead of the fixed 1/64: on a
-        # 16-thread machine the analysis was running on a single core. Half the
-        # threads (capped at 8) keeps the desktop responsive while it runs.
-        threads = max(1, min(8, (os.cpu_count() or 2) // 2))
-        engine.configure({"Threads": threads, "Hash": 512})
+        engine.configure({"Threads": 1, "Hash": 64})
         for ply, move in enumerate(moves, start=1):
             is_user = board.turn == user_color
             if is_user:
